@@ -1,0 +1,124 @@
+(() => {
+ 'use strict';
+ const course=window.COURSE, key='practical:'+course.version;
+ const $=id=>document.getElementById(id);
+ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const fresh=()=>({version:course.version,name:'',group:'',current:0,finalized:false,submitted:false,steps:course.steps.map(()=>({notes:'',answers:Array(5).fill(''),checks:0,first:null,last:null,passed:false})),updated:null});
+ let state=fresh(),storageOK=true,summary=false;
+ try{
+  const raw=localStorage.getItem(key);
+  if(raw){const s=JSON.parse(raw);if(validState(s)) state=s;else $('notice').textContent='Попередній запис не вдалося відновити. Починаємо новий прохід.';}
+ }catch{storageOK=false;}
+ function validState(s){return s&&s.version===course.version&&typeof s.name==='string'&&typeof s.group==='string'&&Number.isInteger(s.current)&&s.current>=0&&s.current<10&&Array.isArray(s.steps)&&s.steps.length===10&&s.steps.every(x=>x&&typeof x.notes==='string'&&Array.isArray(x.answers)&&x.answers.length===5&&x.answers.every(a=>typeof a==='string'||Number.isInteger(a))&&Number.isInteger(x.checks)&&x.checks>=0&&(x.first===null||Number.isInteger(x.first)&&x.first>=0&&x.first<=5)&&(x.last===null||Number.isInteger(x.last)&&x.last>=0&&x.last<=5)&&typeof x.passed==='boolean');}
+ function visibilitySummary(){
+  const v=state.visibility;
+  return v?{hiddenCount:v.hiddenCount,hiddenMs:v.hiddenMs}:null;
+ }
+ function trackVisibility(finish=false){
+  if(state.finalized)return;
+  if(!state.visibility&&state.steps.some(s=>s.notes.trim()||s.answers.some(a=>a!=='')))state.visibility={hiddenCount:0,hiddenMs:0,hiddenSince:null};
+  const v=state.visibility;
+  if(!v)return;
+  const now=Date.now();
+  if(finish||document.visibilityState==='visible'){
+   if(v.hiddenSince!==null)v.hiddenMs+=Math.max(0,now-v.hiddenSince);
+   v.hiddenSince=null;
+  }else if(document.visibilityState==='hidden'&&v.hiddenSince===null){v.hiddenSince=now;v.hiddenCount++;}
+ }
+ function visibilityHTML(){
+  const v=visibilitySummary();
+  if(!v)return '<p>Дані про видимість сторінки відсутні.</p>';
+  const sec=Math.floor(v.hiddenMs/1000);
+  return `<h2>Видимість сторінки</h2><p>Сторінка ставала невидимою: ${v.hiddenCount} раз(ів). Приблизний час: ${Math.floor(sec/60)} хв ${sec%60} с.</p><p class="meta">Причина невідома: наприклад, інша вкладка, згортання браузера або блокування екрана. Дані браузера не є доказом списування.</p>`;
+ }
+ function save(){trackVisibility();state.updated=new Date().toISOString();try{localStorage.setItem(key,JSON.stringify(state));storageOK=true;}catch{storageOK=false;} $('save-status').parentElement.hidden=storageOK;$('save-status').textContent=storageOK?'':'Автозбереження недоступне. Не закривайте вкладку.';}
+ function unlocked(){const i=state.steps.findIndex(x=>!x.passed);return i<0?9:i;}
+ function count(){return state.steps.filter(x=>x.passed).length;}
+ function numberValue(a){const s=String(a).trim().replace(/\s/g,'').replace(',','.').replace('−','-');return /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(s)?Number(s):NaN;}
+ function correct(q,a){return q.type==='number'?Number.isFinite(numberValue(a))&&Math.abs(numberValue(a)-q.answer)<=q.tolerance+1e-9:Number(a)===q.answer&&a!=='';}
+ function nav(){
+  const done=count();$('progress').value=done;$('progress-label').textContent=`${done} із 10 кроків`;$('progress-percent').textContent=`${done*10} %`;
+  $('step-nav').innerHTML=course.steps.map((x,i)=>`<button type="button" data-step="${i}" class="nav-step ${state.steps[i].passed?'done':''} ${!summary&&state.current===i?'current':''}" ${i>unlocked()||(state.finalized&&!state.submitted)?'disabled':''} ${!summary&&state.current===i?'aria-current="step"':''}><span class="index">${state.steps[i].passed?'✓':String(i+1).padStart(2,'0')}</span><span>${esc(x.title)}</span></button>`).join('');
+  $('step-nav').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>go(Number(b.dataset.step))));
+  $('summary-button').disabled=done!==10;
+ }
+ function diagram(step){
+  if(!step.diagram)return '';
+  const d=step.diagram;
+  return `<section class="mask-view" aria-label="${esc(d.title)}"><p class="section-kicker">${esc(d.title)}</p><ol class="case-flow">${d.items.map(item=>`<li>${esc(item)}</li>`).join('')}</ol><p class="mask-note">${esc(d.note)}</p></section>`;
+ }
+ function question(q,i,s){const answer=s.answers[i];return `<fieldset class="question" id="question-${i}"><legend><span class="qno">ЗАПИТАННЯ ${i+1} / 5</span>${esc(q.text)}</legend>${q.type==='number'?`<div class="numeric"><input aria-label="Відповідь на запитання ${i+1}, ${esc(q.unit)}" type="text" inputmode="decimal" autocomplete="off" data-question="${i}" value="${esc(answer)}" maxlength="32" placeholder="Введіть число"><span>${esc(q.unit)}</span></div><p class="hint">${esc(q.rounding)}</p>`:`<div class="answers">${q.options.map((o,j)=>`<label class="option"><input type="radio" name="question-${i}" value="${j}" data-question="${i}" ${String(answer)===String(j)?'checked':''}><span>${esc(o)}</span></label>`).join('')}</div>`}<p class="feedback" hidden></p></fieldset>`;}
+ function renderStep(){
+  if(state.finalized&&!state.submitted){renderSummary(false);return;}
+  summary=false;$('summary-content').hidden=true;$('step-content').hidden=false;
+  const n=state.current, step=course.steps[n],s=state.steps[n];
+  $('step-content').innerHTML=`<div class="step-heading"><span class="counter">КРОК ${String(n+1).padStart(2,'0')} / 10</span><span class="tag">${esc(step.tag)} · ≈ ${step.minutes} хв</span></div><h2 class="step-title" tabindex="-1">${esc(step.title)}</h2><p class="step-intro">${esc(step.intro)}</p><section class="theory" aria-label="Пояснення та вихідні дані"><h3 class="section-kicker">Пояснення та вихідні дані</h3>${step.theory.map(t=>`<p>${esc(t)}</p>`).join('')}</section>${diagram(step)}<section class="task"><h3>Ваше рішення</h3><p id="task-prompt">${esc(step.task)}</p><label for="step-notes">Запис для звіту</label><textarea id="step-notes" aria-describedby="task-prompt" placeholder="Запишіть рішення, формули та пояснення…" maxlength="12000">${esc(s.notes)}</textarea><div class="hint">Зміст цього запису оцінює викладач. Тести нижче перевіряють розуміння умов.</div></section><form id="quiz-form" novalidate><div class="quiz-heading"><h3>Перевірка рішення</h3><span>5 запитань</span></div><p class="hint">Для розрахунків використовуйте калькулятор. Вводьте лише число, можна з комою або крапкою. Після перевірки прочитайте пояснення й виправте помилки.</p>${step.questions.map((q,i)=>question(q,i,s)).join('')}<div id="check-status" role="status" aria-live="polite" ${s.last===null?'hidden':''} class="check-status"></div><div class="actions"><button class="button" type="submit">${n===9?'Завершити перевірку та здати роботу':'Перевірити відповіді'}</button><button ${n===9?'hidden':''} class="button secondary" type="button" id="next-button" ${s.passed?'':'disabled'}>${'Наступний крок →'}</button>${n>0?'<button type="button" id="previous-button" class="button secondary">← Назад</button>':''}</div></form>`;
+  $('step-notes').addEventListener('input',e=>{s.notes=e.target.value;if(!s.notes.trim())invalidate();save();});
+  $('quiz-form').querySelectorAll('input[data-question]').forEach(input=>input.addEventListener('input',e=>{const i=Number(e.target.dataset.question);s.answers[i]=e.target.value;invalidate(i);save();}));
+  $('quiz-form').addEventListener('submit',e=>{e.preventDefault();check();});
+  $('next-button').addEventListener('click',()=>{if(!s.passed)return;if(n===9)renderSummary(true);else go(n+1);});
+  if(n>0)$('previous-button').addEventListener('click',()=>go(n-1));
+  ['gloss','foil'].forEach(type=>{const cb=$('show-'+type);if(cb)cb.addEventListener('change',()=>document.querySelector('.mask-'+type).style.display=cb.checked?'':'none');});
+  if(s.last!==null)showResults(s.passed);
+  if(state.finalized){$('quiz-form').querySelectorAll('input,button').forEach(el=>el.disabled=true);$('step-notes').readOnly=true;}
+  nav();
+ }
+ function invalidate(i){
+  const s=state.steps[state.current];s.passed=false;
+  // A modified checkpoint must be checked again. Later work remains saved.
+  $('next-button').disabled=true;
+  if(i!==undefined){const q=$('question-'+i);q.classList.remove('correct','incorrect');q.querySelector('.feedback').hidden=true;}
+  const status=$('check-status');status.hidden=false;status.className='check-status';status.textContent='Відповіді змінено. Перевірте цей крок повторно, щоб продовжити.';nav();
+ }
+ function check(){
+  if(state.finalized)return;
+  const n=state.current,s=state.steps[n],step=course.steps[n];
+  if(n===9&&!identityReady())return;
+  const missing=s.answers.findIndex((a,i)=>String(a).trim()===''||(step.questions[i].type==='number'&&!Number.isFinite(numberValue(a))));
+  if(!s.notes.trim()){message('Спочатку запишіть своє рішення для звіту.');$('step-notes').focus();return;}
+  if(missing>=0){message(`Дайте коректну відповідь на запитання ${missing+1}. У числовому полі потрібне лише число.`);$('question-'+missing).querySelector('input').focus();return;}
+  const score=step.questions.reduce((a,q,i)=>a+Number(correct(q,s.answers[i])),0);
+  s.checks++;if(s.first===null)s.first=score;s.last=score;s.passed=score===5;
+  if(n===9&&s.passed&&count()===10){trackVisibility(true);state.finalized=true;save();freezeIdentity();renderSummary(true);return;}
+  save();showResults(true);nav();
+  $('check-status').scrollIntoView({block:'center',behavior:'auto'});
+ }
+ function message(text){const el=$('check-status');el.hidden=false;el.className='check-status error';el.textContent=text;}
+ function showResults(showFeedback){
+  const s=state.steps[state.current],step=course.steps[state.current];
+  if(showFeedback)step.questions.forEach((q,i)=>{const ok=correct(q,s.answers[i]),el=$('question-'+i);el.classList.toggle('correct',ok);el.classList.toggle('incorrect',!ok);const f=el.querySelector('.feedback');f.hidden=false;f.textContent=(ok?'✓ Правильно. ':'↻ Потрібно виправити. ')+q.explain;});
+  const status=$('check-status');status.hidden=false;status.className='check-status'+(s.passed?'':' error');
+  status.textContent=s.passed?`Крок завершено: 5 із 5. Перша перевірка: ${s.first}/5. Перевірок: ${s.checks}. Запис додано до звіту.`:`Остання перевірка: ${s.last}/5. Прочитайте пояснення й виправте відповіді. Для переходу потрібно 5 із 5 та запис власного рішення. Перша перевірка: ${s.first}/5.`;
+  $('next-button').disabled=!s.passed;
+ }
+ function go(n){if(state.finalized&&!state.submitted)return;if(n>unlocked())return;state.current=n;save();renderStep();const heading=document.querySelector('.step-title');heading.focus({preventScroll:true});heading.scrollIntoView({block:'start',behavior:'auto'});}
+ function renderSummary(autoSend=false){
+  if(count()!==10)return;summary=true;$('step-content').hidden=true;$('summary-content').hidden=false;
+  if(state.finalized&&!state.submitted){
+   $('summary-content').innerHTML='<div class="summary-hero"><h2>Роботу завершено.</h2><p>Відповіді зафіксовано. Автоматично зберігаємо звіт викладачеві. Результат з’явиться після підтвердження збереження.</p></div><div class="actions"></div>';
+   nav();$('summary-content').scrollIntoView({block:'start'});document.dispatchEvent(new CustomEvent('pr:summary',{detail:{autoSend:autoSend===true}}));return;
+  }
+  const initial=state.steps.reduce((a,s)=>a+(s.first||0),0),checks=state.steps.reduce((a,s)=>a+s.checks,0);
+  $('summary-content').innerHTML=`<div class="summary-hero"><p class="section-kicker" style="color:#d4e8ba">ПРОЄКТ ЗАВЕРШЕНО</p><h2>Практичну роботу збережено.</h2></div><div class="stats"><div class="stat"><b>${initial}/50</b><span>Правильних відповідей під час перших перевірок</span></div><div class="stat"><b>50/50</b><span>Підсумкове опрацювання після виправлень</span></div><div class="stat"><b>${checks}</b><span>Перевірок за весь прохід</span></div></div><ul class="summary-list">${course.steps.map((x,i)=>`<li><span>${String(i+1).padStart(2,'0')} · ${esc(x.title)}<br><small>Перша перевірка ${state.steps[i].first}/5 · перевірок ${state.steps[i].checks}</small></span><button type="button" data-review="${i}">Переглянути</button></li>`).join('')}</ul><div class="actions"><button type="button" class="button" id="download-final">Завантажити звіт HTML ↓</button><button type="button" class="button secondary" id="print-final">Друк / PDF</button></div>`;
+  $('summary-content').querySelectorAll('[data-review]').forEach(b=>b.addEventListener('click',()=>go(Number(b.dataset.review))));
+  $('download-final').addEventListener('click',downloadReport);$('print-final').addEventListener('click',printReport);nav();$('summary-content').scrollIntoView({block:'start'}); document.dispatchEvent(new CustomEvent('pr:summary',{detail:{autoSend:autoSend===true}}));
+ }
+ function identityReady(){if(!$('student-name').value.trim()||!$('student-group').value.trim()){$('notice').textContent='Для здавання або завантаження звіту заповніть ПІБ і групу.';(!$('student-name').value.trim()?$('student-name'):$('student-group')).focus();return false;}$('notice').textContent='';return true;}
+ function reportHTML(){const initial=state.steps.reduce((a,s)=>a+(s.first||0),0);return `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ПР4 — ${esc(state.name)}</title><style>body{font:16px/1.7 Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 24px;color:#183a34}h1{font-size:28px}h2{margin-top:36px;font-size:22px;border-bottom:1px solid #ccd6c9;padding-bottom:10px}h3{font-size:17px}.notes{white-space:pre-wrap;background:#f4f6ef;padding:20px;border:1px solid #dce3d6;overflow-wrap:anywhere}li{margin:20px 0}.meta{color:#526459;font-size:14px}.ok{color:#286442}button{padding:12px;background:#194c40;color:white;border:0;border-radius:4px}@media print{button{display:none}body{margin:0;max-width:none;font-size:11pt}h2{break-after:avoid}.notes{background:none}li{break-inside:avoid}}</style></head><body><h1>Практична робота № 4<br>${esc(course.title)}</h1><p><b>Студент:</b> ${esc(state.name)}<br><b>Група:</b> ${esc(state.group)}</p><p class="meta">Сформовано: ${esc(new Date().toLocaleString('uk-UA'))}. Версія завдання: ${esc(course.version)}.</p><p>Завершено: ${count()}/10 кроків. Перші перевірки: ${initial}/50. Підсумкове опрацювання: 50/50 після виправлень.</p><p class="meta">Це звіт навчального тренажера, що формується на пристрої студента. Повторні спроби дозволені, відповіді доступні в поясненнях. Зміст рішень та оцінку визначає викладач.</p>${visibilityHTML()}${course.steps.map((step,n)=>{const s=state.steps[n];return `<section><h2>${n+1}. ${esc(step.title)}</h2><p class="meta">Перша перевірка: ${s.first}/5. Остання: ${s.last}/5. Перевірок: ${s.checks}.</p><h3>Завдання</h3><p>${esc(step.task)}</p><h3>Рішення студента</h3><div class="notes">${esc(s.notes)}</div><h3>Тестові відповіді</h3><ol>${step.questions.map((q,i)=>`<li><p>${esc(q.text)}</p><b>Відповідь:</b> ${esc(q.type==='choice'?q.options[Number(s.answers[i])]:s.answers[i]+' '+q.unit)}<br><span class="ok">${correct(q,s.answers[i])?'Правильно':'Потрібна перевірка'}</span><br>${esc(q.explain)}</li>`).join('')}</ol></section>`;}).join('')}<p class="meta">Усі ціни, допуски та розрахункові моделі — навчальні. Цей звіт не замінює погодженої виробничої документації.</p></body></html>`;}
+ window.PR_DOWNLOAD_REPORT = downloadReport;
+ function downloadReport(){if(!identityReady())return;const blob=new Blob([reportHTML()],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='ПР4_'+state.name.replace(/[^\p{L}\p{N}_-]/gu,'_').slice(0,80)+'.html';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);}
+ function printReport(){if(!identityReady())return;const win=window.open('','_blank');if(!win){$('notice').textContent='Браузер заблокував вкладку друку. Завантажте HTML-звіт, відкрийте його та скористайтеся друком.';return;}let printed=false;const once=()=>{if(!printed&&!win.closed){printed=true;win.print();}};win.opener=null;win.addEventListener('load',once,{once:true});win.document.write(reportHTML());win.document.close();setTimeout(()=>{if(win.document.readyState==='complete')once();},500);}
+ $('student-name').value=state.name;$('student-group').value=state.group;
+ $('student-name').addEventListener('input',e=>{if(state.finalized)return;state.name=e.target.value;save();});$('student-group').addEventListener('input',e=>{if(state.finalized)return;state.group=e.target.value;save();});
+ $('summary-button').addEventListener('click',()=>renderSummary(false));
+
+ window.PR_REPORT={html:reportHTML,identityReady,ready:()=>count()===10,snapshot:()=>({version:course.version,name:state.name,group:state.group,steps:state.steps,...(state.visibility?{visibility:visibilitySummary()}: {})})};
+ function freezeIdentity(){$('student-name').disabled=!!state.finalized;$('student-group').disabled=!!state.finalized;}
+ document.addEventListener('pr:saved',()=>{if(!state.finalized)return;state.submitted=true;save();freezeIdentity();renderSummary(false);});
+ if(count()===10&&state.name.trim()&&state.group.trim()){state.finalized=true;save();}
+ freezeIdentity();
+ if(!state.finalized){save();document.addEventListener('visibilitychange',()=>{if(!state.finalized)save();});}
+ state.current=Math.min(state.current,unlocked());
+ if(state.finalized)document.addEventListener('DOMContentLoaded',()=>renderSummary(!state.submitted),{once:true});else renderStep();
+ if(!storageOK)$('save-status').textContent='Автозбереження недоступне. Не закривайте вкладку до здавання.';
+})();
